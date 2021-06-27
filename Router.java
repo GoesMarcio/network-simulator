@@ -1,6 +1,7 @@
 import java.io.*;
 import java.net.*;
 import java.util.Date;
+import java.util.Arrays;
 import java.util.Scanner;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -8,10 +9,14 @@ import java.util.Collections;
 public class Router{
     private ArrayList<TableData> table;
     private String name;
+    private boolean log;
 
     public Router(String name){
         table = new ArrayList<TableData>();
         this.name = name;
+        this.log = false;
+
+        createFolder();
 
         Thread updateTable = new Thread(new Runnable() {
             @Override
@@ -24,6 +29,12 @@ public class Router{
             }
         });
         updateTable.start();
+    }
+
+    private void createFolder(){
+        File dir = new File("archives_routers/"+this.name);
+        if (!dir.exists()) 
+            dir.mkdirs();
     }
 
     public boolean createPort(int dst_port, int exit_port){
@@ -48,11 +59,14 @@ public class Router{
         });
         receiveTables.start();
 
+        if(this.log)
+            System.out.println("Criei a porta "+dst_port+" conectada com "+exit_port);
+
         return true;
     }
 
     public void printTable(){
-        System.out.println("Minhas portas:");
+        System.out.println("Minha RIPtable:");
         for(int i = 0; i < table.size(); i++){
             TableData aux = table.get(i);
             System.out.println(aux.dst_port+" - "+ aux.metric +" - "+aux.exit_port);
@@ -72,7 +86,8 @@ public class Router{
                     if(aux.timestamp > now){
                         newTable.add(aux);
                     }else{
-                        System.out.println("Excluindo a porta "+aux.dst_port+" da minha RIPtable");
+                        if(this.log)
+                            System.out.println("Excluindo a porta "+aux.dst_port+" da minha RIPtable");
                     }
                 }else{
                     newTable.add(aux);
@@ -87,11 +102,12 @@ public class Router{
         }
     }
 
-    private String encodeTable(){
+    private String encodeTable(int port){
         String response = "";
         for(int i = 0; i < table.size(); i++){
             TableData aux = table.get(i);
-            response += aux.dst_port+"-"+aux.metric+"-"+aux.exit_port+"//";
+            if(aux.exit_port != port)
+                response += aux.dst_port+"-"+aux.metric+"-"+aux.exit_port+"//";
         }
 
         if(response.length() > 2)
@@ -117,24 +133,31 @@ public class Router{
         // System.out.println("Enviando tabelas");
 
         // A cada 10 segundos enviar a sua tabela para os vizinhos (metrica = 1)
-        String message = "RIPtable//";
-        message += encodeTable();
 
         for(int i = 0; i < table.size(); i++){
             TableData aux = table.get(i);
             
-            if(aux.metric == 1){
-                String messageByRouter = aux.exit_port+"//" + message;
-                byte[] sendData = messageByRouter.getBytes();
-                
-                DatagramSocket tableSocket = new DatagramSocket();
-                InetAddress IPAddress = InetAddress.getByName("localhost");
-                    
-                DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, aux.dst_port);
-                // System.out.println("envianu: "+aux.dst_port);
+            if(aux.metric == 0){
+                for(int j = 0; j < table.size(); j++){
+                    TableData aux2 = table.get(j);
+                    if(aux2.metric == 1 && aux2.exit_port == aux.dst_port){
+                        String message = "RIPtable//";
+                        message += encodeTable(aux2.dst_port);
+                        String messageByRouter = aux2.exit_port+"//" + message;
+                        byte[] sendData = messageByRouter.getBytes();
+                        
+                        DatagramSocket tableSocket = new DatagramSocket();
+                        InetAddress IPAddress = InetAddress.getByName("localhost");
+                            
+                        DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, aux2.dst_port);
+                        
+                        if(this.log) 
+                            System.out.println("Enviando tabela RIP: p/ "+aux2.dst_port);
 
-                tableSocket.send(sendPacket);
-                tableSocket.close();
+                        tableSocket.send(sendPacket);
+                        tableSocket.close();
+                    }
+                }
             }
         }
         
@@ -152,7 +175,9 @@ public class Router{
     }
 
     public void receiveTable(int fromPort, String data){
-        // System.out.println("chego em mim da porta "+fromPort+": "+data);
+        if(this.log)
+            System.out.println("Recebi RIPtable de "+fromPort);
+
         ArrayList<TableData> auxTable = decodeTable(data);
 
         for(int i = 0; i < auxTable.size(); i++){
@@ -174,13 +199,12 @@ public class Router{
         // Ouvir as minhas portas
         while(true){
             DatagramSocket tableSocket = new DatagramSocket(port);
-            byte[] receiveData = new byte[250];
+            byte[] receiveData = new byte[4000];
 
             DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
             tableSocket.receive(receivePacket);
             String data = new String(receivePacket.getData(), "UTF-8").trim();
 
-            // System.out.println("Recebi mensagem: "+data);
             try{
                 String[] fields = data.split("//", 3);
                 int headerPort = Integer.parseInt(fields[0]);
@@ -193,7 +217,6 @@ public class Router{
                         break;
                     
                     case "msg":
-                            System.out.println("Recebi um bgl");
                             if(isMyPort(headerPort)){
                                 System.out.println(data_field);
                             }else{
@@ -202,6 +225,12 @@ public class Router{
                         break;
 
                     case "arq":
+                            String[] archive_data = data_field.split("//");
+                            if(isMyPort(headerPort)){
+                                receiveArchive(archive_data[0], archive_data[1]);
+                            }else{
+                                resendArchive(headerPort, archive_data[0], archive_data[1]);
+                            }
                         break;
 
                     default:
@@ -257,12 +286,135 @@ public class Router{
         tableSocket.send(sendPacket);
         tableSocket.close();
 
+        if(this.log){
+            if(dst == sendTo)
+                System.out.println("Enviando mensagem para "+sendTo);
+            else
+                System.out.println("Reenviando mensagem para "+sendTo);
+        }
     }
 
-    public static void main(String[] args){
+    public String convertByteToString(byte[] data){
+        String ret = "";
+
+        for(int i = 0; i < data.length; i++){
+            ret += ((byte) data[i]) + ";";
+        }
+
+        return ret;
+    }
+
+    public byte[] convertStringToByte(String str){
+        String[] aux = str.split(";");
+        byte[] ret = new byte[aux.length];
+
+        for(int i = 0; i < aux.length; i++){
+            // System.out.println(aux[i]);
+            ret[i] = (byte) Integer.parseInt(aux[i]);
+        }
+
+        return ret;
+    }
+
+    public void receiveArchive(String archive, String strByte) throws Exception{
+        byte[] data = convertStringToByte(strByte);
+
+        OutputStream outputStream = new FileOutputStream(new File("archives_routers/"+this.name+"/"+archive));
+        outputStream.write(data);
+        outputStream.close();
+    }
+
+    public void resendArchive(int dst, String archive, String archiveByte) throws Exception{
+
+        String message = dst+"//arq//"+archive+"//"+archiveByte;
+        int sendTo = searchPath(dst);
+
+        if(sendTo == -1){
+            return;
+        }
+
+        byte[] sendData = message.getBytes();
+        
+        DatagramSocket tableSocket = new DatagramSocket();
+        InetAddress IPAddress = InetAddress.getByName("localhost");
+            
+        DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, sendTo);
+
+        tableSocket.send(sendPacket);
+        tableSocket.close();
+
+        if(this.log){
+            System.out.println("Reenviando arquivo "+sendTo);
+        }
+        
+    }
+
+    public void sendArchive(int dst, String archive) throws Exception{
+        File file = new File("archives_routers/"+this.name+"/"+archive);
+        if(!file.exists()){
+            System.out.println("O arquivo nao existe!");
+            return;
+        }
+
+        InputStream inputStream = new FileInputStream(file);
+        int byteRead;
+        byte[] data = new byte[(int) file.length()];
+        int j = 0;
+        while ((byteRead = inputStream.read()) != -1) {
+            data[j] = (byte) byteRead;
+            j++;
+        }
+
+        String archiveByte = convertByteToString(data);
+
+        String message = dst+"//arq//"+archive+"//"+archiveByte;
+        int sendTo = searchPath(dst);
+
+        if(sendTo == -1){
+            return;
+        }
+
+        byte[] sendData = message.getBytes();
+        
+        DatagramSocket tableSocket = new DatagramSocket();
+        InetAddress IPAddress = InetAddress.getByName("localhost");
+            
+        DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, sendTo);
+
+        tableSocket.send(sendPacket);
+        tableSocket.close();
+
+        if(this.log){
+            if(dst == sendTo)
+                System.out.println("Enviando mensagem para "+sendTo);
+            else
+                System.out.println("Reenviando mensagem para "+sendTo);
+        }
+    }
+
+    public void log(){
+        this.log = !this.log;
+    }
+
+    public void printHelp(){
+        
+        String message = "\u001B[43m\u001B[30mComandos\u001B[0m:\n";
+
+        message += "\u001B[43m\u001B[30m/lst\u001B[0m - Exibe a RIPtable do roteador.\n";
+        message += "\u001B[43m\u001B[30m/c port port\u001B[0m - Cria conexao de uma porta do roteador com outra porta.\n";
+        message += "\u001B[43m\u001B[30m/msg port text\u001B[0m - Envia uma mensagem para um roteador atraves de uma porta.\n";
+        message += "\u001B[43m\u001B[30m/arc port file\u001B[0m - Envia um arquivo para um roteador atraves de uma porta.\n";
+        message += "\u001B[43m\u001B[30m/help\u001B[0m - Exibe os comandos do roteador.\n";
+        message += "\u001B[43m\u001B[30m/log\u001B[0m - Ativa/desativa mensagens de log.\n";
+        message += "\u001B[43m\u001B[30m/shutdown\u001B[0m - Desliga o roteador.\n";
+            
+        System.out.println(message);
+    }
+
+    public static void main(String[] args) throws Exception{
         Scanner sc = new Scanner(System.in);
 
-        String myname = sc.next();
+        String myname = args[0];
         Router self = new Router(myname);
 
         // Rotear
@@ -284,46 +436,66 @@ public class Router{
 
 
         while(sc.hasNext()){
-            String line = sc.nextLine();
-            String[] splitLine = line.split(" ", 2);
+            try{
+                String line = sc.nextLine();
+                String[] splitLine = line.split(" ", 2);
 
-            String command = splitLine[0];
-            String str = "";
+                String command = splitLine[0];
+                String str = "";
 
-            if(splitLine.length >= 2)
-                str = splitLine[1];
+                if(splitLine.length >= 2)
+                    str = splitLine[1];
 
-            switch(command){
-                case "/c":
-                        // splitLine is [0] = dst_port, [1] = exit_port
-                        System.out.println(str);
-                        String[] strSplit = str.split(" ");
-                        int dst_port = Integer.parseInt(strSplit[0]);
-                        int exit_port = Integer.parseInt(strSplit[1]);
+                switch(command){
+                    case "/c":
+                            // splitLine is [0] = dst_port, [1] = exit_port
+                            String[] strSplit = str.split(" ");
+                            int dst_port = Integer.parseInt(strSplit[0]);
+                            int exit_port = Integer.parseInt(strSplit[1]);
 
-                        boolean response = self.createPort(dst_port, exit_port);
-
-                        System.out.println("Criei a porta "+dst_port+" conectada com "+exit_port+" com: "+response);
-                    break;
-                case "/l":
-                        self.printTable();
-                    break;
-                case "/msg":
-                        String[] strSplit2 = str.split(" ", 2);
-                        int dst_port2 = Integer.parseInt(strSplit2[0]);
-                        String message = strSplit2[1];
+                            boolean response = self.createPort(dst_port, exit_port);
+                        break;
+                    case "/lst":
+                            self.printTable();
+                        break;
+                    case "/msg":
+                            String[] strSplit2 = str.split(" ", 2);
+                            int dst_port2 = Integer.parseInt(strSplit2[0]);
+                            String message = strSplit2[1];
+                        
+                            try{
+                                self.sendMessage(dst_port2, message);
+                            }catch(Exception e){
+                                System.out.println("Erro:" + e.getMessage());
+                            }
+                        break;
                     
-                        try{
-                           self.sendMessage(dst_port2, message);
-                        }catch(Exception e){
-                            System.out.println("Erro:" + e.getMessage());
-                        }
-                    break;
-                
-                case "/arq":
-                    break;
-                
-                //TODO
+                    case "/arc":
+                            String[] strSplit3 = str.split(" ", 2);
+                            int dst_port3 = Integer.parseInt(strSplit3[0]);
+                            String archive = strSplit3[1];
+                            
+                            try{
+                                self.sendArchive(dst_port3, archive);
+                            }catch(Exception e){
+                                System.out.println("Erro:" + e.getMessage());
+                            }
+                        break;
+                    
+                    case "/help":
+                            self.printHelp();
+                        break;
+                    case "/log":
+                            self.log();
+                        break;
+                    case "/shutdown":
+                            System.exit(0);
+                        break;
+                    
+                    //TODO
+                }
+            }catch(Exception e){
+                System.out.println("Erro:" + e.getMessage());
             }
         }
     }
