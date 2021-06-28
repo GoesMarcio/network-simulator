@@ -143,7 +143,7 @@ public class Router{
                     if(aux2.metric == 1 && aux2.exit_port == aux.dst_port){
                         String message = "RIPtable//";
                         message += encodeTable(aux2.dst_port);
-                        String messageByRouter = aux2.exit_port+"//" + message;
+                        String messageByRouter = aux.dst_port+"//"+aux2.exit_port+"//" + message;
                         byte[] sendData = messageByRouter.getBytes();
                         
                         DatagramSocket tableSocket = new DatagramSocket();
@@ -152,7 +152,7 @@ public class Router{
                         DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, aux2.dst_port);
                         
                         if(this.log) 
-                            System.out.println("Enviando tabela RIP: p/ "+aux2.dst_port);
+                            System.out.println("\u001B[33;1mEnviando tabela RIP: p/ "+aux2.dst_port+"\u001B[0m");
 
                         tableSocket.send(sendPacket);
                         tableSocket.close();
@@ -176,7 +176,7 @@ public class Router{
 
     public void receiveTable(int fromPort, String data){
         if(this.log)
-            System.out.println("Recebi RIPtable de "+fromPort);
+            System.out.println("\u001B[31;1mRecebi RIPtable de "+fromPort+"\u001B[0m");
 
         ArrayList<TableData> auxTable = decodeTable(data);
 
@@ -206,30 +206,32 @@ public class Router{
             String data = new String(receivePacket.getData(), "UTF-8").trim();
 
             try{
-                String[] fields = data.split("//", 3);
-                int headerPort = Integer.parseInt(fields[0]);
-                String header = fields[1];
-                String data_field = fields[2];
+                String[] fields = data.split("//", 4);
+                int headerPortSRC = Integer.parseInt(fields[0]);
+                int headerPortDST = Integer.parseInt(fields[1]);
+                String header = fields[2];
+                String data_field = fields[3];
 
                 switch(header){
                     case "RIPtable":
-                            receiveTable(headerPort, data_field);
+                            receiveTable(headerPortDST, data_field);
                         break;
                     
                     case "msg":
-                            if(isMyPort(headerPort)){
-                                System.out.println(data_field);
+                            if(isMyPort(headerPortDST)){
+                                System.out.println("\u001B[32m"+headerPortSRC + "\u001B[0m enviou: " + data_field);
                             }else{
-                                sendMessage(headerPort, data_field);
+                                resendMessage(headerPortSRC, headerPortDST, data_field);
                             }
                         break;
 
                     case "arq":
                             String[] archive_data = data_field.split("//");
-                            if(isMyPort(headerPort)){
+                            if(isMyPort(headerPortDST)){
+                                System.out.println("\u001B[32m"+headerPortSRC + "\u001B[0m enviou um arquivo: " + archive_data[0]);
                                 receiveArchive(archive_data[0], archive_data[1]);
                             }else{
-                                resendArchive(headerPort, archive_data[0], archive_data[1]);
+                                resendArchive(headerPortSRC, headerPortDST, archive_data[0], archive_data[1]);
                             }
                         break;
 
@@ -268,10 +270,48 @@ public class Router{
         return searchPath(aux.exit_port);
     }
 
+    public int searchPath2(int dst){
+        TableData aux = searchPort(dst);
+        if(aux == null)
+            return -1;
+        
+        if(isMyPort(aux.exit_port)){
+            return aux.exit_port;
+        }
+
+        return searchPath2(aux.exit_port);
+    }
+
     public void sendMessage(int dst, String _message) throws Exception{
-        String message = dst+"//msg//"+_message;
         int sendTo = searchPath(dst);
 
+        String message = searchPath2(dst)+"//"+dst+"//msg//"+_message;
+        if(sendTo == -1){
+            return;
+        }
+
+        byte[] sendData = message.getBytes();
+        
+        DatagramSocket tableSocket = new DatagramSocket();
+        InetAddress IPAddress = InetAddress.getByName("localhost");
+            
+        DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, sendTo);
+
+        tableSocket.send(sendPacket);
+        tableSocket.close();
+
+        if(this.log){
+            if(dst == sendTo)
+                System.out.println("Enviando mensagem para "+sendTo);
+            else
+                System.out.println("Reenviando mensagem para "+sendTo);
+        }
+    }
+
+    public void resendMessage(int src, int dst, String _message) throws Exception{
+        int sendTo = searchPath(dst);
+
+        String message = src+"//"+dst+"//msg//"+_message;
         if(sendTo == -1){
             return;
         }
@@ -324,9 +364,9 @@ public class Router{
         outputStream.close();
     }
 
-    public void resendArchive(int dst, String archive, String archiveByte) throws Exception{
+    public void resendArchive(int src, int dst, String archive, String archiveByte) throws Exception{
 
-        String message = dst+"//arq//"+archive+"//"+archiveByte;
+        String message = src+"//"+dst+"//arq//"+archive+"//"+archiveByte;
         int sendTo = searchPath(dst);
 
         if(sendTo == -1){
@@ -367,7 +407,7 @@ public class Router{
 
         String archiveByte = convertByteToString(data);
 
-        String message = dst+"//arq//"+archive+"//"+archiveByte;
+        String message = searchPath2(dst)+"//"+dst+"//arq//"+archive+"//"+archiveByte;
         int sendTo = searchPath(dst);
 
         if(sendTo == -1){
